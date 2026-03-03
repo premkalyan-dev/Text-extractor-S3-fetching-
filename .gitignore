@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.csv
+*.xlsx
+.env
+.aws/
+temp_reports/
+.env
+*.pdf
+old/s3_batch_fetch_old.py
+.old/
