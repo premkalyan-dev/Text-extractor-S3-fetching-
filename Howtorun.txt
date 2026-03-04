@@ -1,0 +1,71 @@
+DiagnoiQ Text Extractor + DB
+How to Run and Flow
+
+1) What this project does
+- Downloads PDF lab reports from S3.
+- Extracts structured lab-test rows from each PDF.
+- Inserts extracted data into PostgreSQL.
+- Tracks successful, failed, and retried files.
+
+2) Prerequisites
+- Python 3.10+ (recommended)
+- PostgreSQL running locally (or update connection settings)
+- AWS S3 access key and secret with read permission on your bucket
+
+3) Install dependencies
+- Create/activate virtual environment (optional but recommended)
+- Install packages:
+  pip install -r requirements.txt
+
+4) Configure environment
+Create/update `.env` with at least:
+- AWS_ACCESS_KEY_ID=...
+- AWS_SECRET_ACCESS_KEY=...
+- AWS_REGION=ap-south-2                (or your region)
+- BUCKET_NAME=diagnoiqailab-reports    (or your bucket)
+- S3_PREFIX=labid/year/month/2/        (or your key prefix)
+- LOCAL_DOWNLOAD_PATH=reports          (or your local download dir)
+
+Also update DB credentials in `db/db_config.py`:
+- host
+- database
+- user
+- password
+- port
+
+5) Database tables expected
+- public.lab_results
+- failed_reports
+- success_reports
+
+6) Run options
+A) Run one batch once:
+  python main.py
+
+B) Run continuously every 30 seconds:
+  python scheduler.py
+
+7) End-to-end flow
+1. `main.py` calls `run_batch()` from `s3_batch.py`.
+2. Batch first retries files from `failed_reports` where retry_count < 3.
+3. For each retry file:
+   - Download PDF from S3
+   - Extract lab data using `extractor.extract_lab_data()`
+   - If extract fails: increment retry count/status
+   - If extract succeeds: insert into `lab_results`, mark success, remove from failed
+4. Batch then loads all S3 PDFs under configured prefix.
+5. Skips files already present in `processed_files.json` and permanently failed keys.
+6. Processes only first 2 new files per run (`BATCH_SIZE = 2`).
+7. For each new file:
+   - Download PDF
+   - Derive patient name from filename
+   - Extract table data from PDF pages
+   - Add `Patient_ID` and `Patient_Name`
+   - Insert rows into `lab_results`
+   - Insert audit row into `success_reports`
+   - Save S3 key to `processed_files.json`
+
+8) Notes
+- Processed key tracking file: `processed_files.json`
+- Downloaded PDFs folder: `reports/`
+- Retry logic marks a file `permanent_failed` after 3 failed attempts.

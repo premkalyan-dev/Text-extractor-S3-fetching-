@@ -80,7 +80,7 @@ def download_single_pdf(key):
 
 def run_batch():
 
-    BATCH_SIZE = 2
+    BATCH_SIZE = 10
 
     print("\n================ RETRYING FAILED =================\n")
 
@@ -165,3 +165,5 @@ def run_batch():
         patient_id_counter += 1
 
     print("\nBatch Completed\n")
+    
+    

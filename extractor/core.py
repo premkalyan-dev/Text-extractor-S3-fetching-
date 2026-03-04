@@ -1,5 +1,4 @@
  # Core extraction logic (extract_lab_data, extract_from_page)
- 
 import pdfplumber
 import pandas as pd
 import re
