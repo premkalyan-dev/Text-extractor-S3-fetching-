@@ -1,18 +1,46 @@
 from db.db_config import get_connection
 
+# ---------------- CREATE REPORT ENTRY ----------------
+def create_report_entry(s3_path):
 
-# ---------------- GET PERMANENT FAILED ----------------
-def get_permanent_failed():
-    """
-    Returns list of s3_keys that are permanently failed
-    """
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT s3_key
-        FROM public.failed_reports
-        WHERE status = 'permanent_failed'
+        INSERT INTO dev.reports_upload_details
+        (s3_path, upload_status_id, uploaded_at)
+        VALUES (%s, 2, CURRENT_TIMESTAMP)
+        RETURNING report_id
+    """, (s3_path,))
+
+    result = cursor.fetchone()
+
+    if not result:
+        conn.commit()
+        cursor.close()
+        conn.close()
+        raise Exception("Failed to create report entry")
+
+    report_id = result[0]
+
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return report_id
+
+
+# ---------------- GET PERMANENT FAILED ----------------
+def get_permanent_failed():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT s3_path
+        FROM dev.reports_upload_details
+        WHERE upload_status_id = 5
     """)
 
     rows = cursor.fetchall()
@@ -23,24 +51,17 @@ def get_permanent_failed():
     return [row[0] for row in rows]
 
 
-# ---------------- INSERT FAILED REPORT ----------------
-def insert_failed_report(patient_name, key, error):
-    """
-    Insert a new failed report.
-    Default retry_count = 0
-    Default status = 'retrying'
-    """
+# ---------------- MARK FAILED ----------------
+def insert_failed_report(report_id):
 
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
-        INSERT INTO public.failed_reports 
-        (patient_name, s3_key, error_message, retry_count, status, last_attempt)
-        VALUES (%s, %s, %s, 0, 'retrying', CURRENT_TIMESTAMP)
-        ON CONFLICT (s3_key)
-        DO NOTHING
-    """, (patient_name, key, error))
+        UPDATE dev.reports_upload_details
+        SET upload_status_id = 4
+        WHERE report_id = %s
+    """, (report_id,))
 
     conn.commit()
 
@@ -48,39 +69,38 @@ def insert_failed_report(patient_name, key, error):
     conn.close()
 
 
-# ---------------- INSERT SUCCESS REPORT ----------------
-def insert_success_report(patient_name, key):
+# ---------------- MARK SUCCESS ----------------
+def insert_success_report(report_id):
 
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
-        INSERT INTO public.success_reports (patient_name, s3_key)
-        VALUES (%s, %s)
-        ON CONFLICT (s3_key)
-        DO NOTHING
-    """, (patient_name, key))
+        UPDATE dev.reports_upload_details
+        SET upload_status_id = 3
+        WHERE report_id = %s
+    """, (report_id,))
 
     conn.commit()
+
     cursor.close()
     conn.close()
 
 
-# ---------------- GET FAILED REPORTS FOR RETRY ----------------
+# ---------------- GET FAILED REPORTS ----------------
 def get_failed_reports(limit=2):
-    """
-    Fetch only retryable reports.
-    Permanent failed will NEVER be returned.
-    """
 
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT patient_name, s3_key
-        FROM public.failed_reports
-        WHERE status != 'permanent_failed'
-        ORDER BY last_attempt ASC
+        SELECT r.report_id, r.s3_path
+        FROM dev.reports_upload_details r
+        JOIN dev.patient_notification_details n
+        ON r.report_id = n.report_id
+        WHERE r.upload_status_id = 4
+        AND n.retry_count < 3
+        ORDER BY r.uploaded_at ASC
         LIMIT %s
     """, (limit,))
 
@@ -92,29 +112,45 @@ def get_failed_reports(limit=2):
     return rows
 
 
-# ---------------- UPDATE RETRY COUNT ----------------
-def update_retry(key):
-    """
-    Increase retry count.
-    If retry_count >= 3 → mark as permanent_failed
-    """
+# ---------------- UPDATE RETRY ----------------
+def update_retry(report_id):
 
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
-        UPDATE public.failed_reports
-        SET 
-            retry_count = retry_count + 1,
-            status = CASE 
-                        WHEN retry_count + 1 >= 3 
-                            THEN 'permanent_failed'
-                        ELSE 'retrying'
-                     END,
-            last_attempt = CURRENT_TIMESTAMP
-        WHERE s3_key = %s
-        AND status != 'permanent_failed'
-    """, (key,))
+        UPDATE dev.patient_notification_details
+        SET retry_count = retry_count + 1
+        WHERE report_id = %s
+        RETURNING retry_count
+    """, (report_id,))
+
+    result = cursor.fetchone()
+
+    if not result:
+        print("No retry record found for report:", report_id)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return
+
+    retry_count = result[0]
+
+    if retry_count >= 3:
+
+        cursor.execute("""
+            UPDATE dev.reports_upload_details
+            SET upload_status_id = 5
+            WHERE report_id = %s
+        """, (report_id,))
+
+    else:
+
+        cursor.execute("""
+            UPDATE dev.reports_upload_details
+            SET upload_status_id = 4
+            WHERE report_id = %s
+        """, (report_id,))
 
     conn.commit()
 
@@ -122,19 +158,17 @@ def update_retry(key):
     conn.close()
 
 
-# ---------------- DELETE FAILED AFTER SUCCESS ----------------
-def delete_failed(key):
-    """
-    Remove from failed table once processing succeeds
-    """
+# ---------------- CLEAR FAILURE AFTER SUCCESS ----------------
+def delete_failed(report_id):
 
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
-        DELETE FROM public.failed_reports
-        WHERE s3_key = %s
-    """, (key,))
+        UPDATE dev.reports_upload_details
+        SET upload_status_id = 3
+        WHERE report_id = %s
+    """, (report_id,))
 
     conn.commit()
 
