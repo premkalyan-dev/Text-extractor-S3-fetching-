@@ -38,41 +38,30 @@ def log(message):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}")
 
 # ==============================
-# DATABASE HELPERS
+# 🔥 NEW: BULK DB FETCH
 # ==============================
-def get_status_id(cursor, status_name):
-    cursor.execute(
-        "SELECT status_id FROM dev.status_details WHERE status_name = %s",
-        (status_name,)
-    )
-    return cursor.fetchone()[0]
-
-def report_should_be_processed(s3_path):
+def get_processed_files():
     conn = get_connection()
     cursor = conn.cursor()
+
     try:
         cursor.execute("""
-            SELECT upload_status_id 
-            FROM dev.reports_upload_details 
-            WHERE s3_path = %s
-        """, (s3_path,))
-        row = cursor.fetchone()
+            SELECT s3_path
+            FROM dev.reports_upload_details
+            WHERE upload_status_id IN (
+                SELECT status_id FROM dev.status_details
+                WHERE status_name IN ('success', 'permanent failed')
+            )
+        """)
 
-        if not row:
-            return True
+        rows = cursor.fetchall()
 
-        status_id = row[0]
-        success = get_status_id(cursor, "success")
-        permanent = get_status_id(cursor, "permanent failed")
-
-        if status_id in (success, permanent):
-            return False
-
-        return True
+        return set(r[0] for r in rows)
 
     finally:
         cursor.close()
         conn.close()
+
 
 # ==============================
 # S3 HELPERS
@@ -109,7 +98,6 @@ def download_via_url(url, key):
     local_path = os.path.join(LOCAL_DOWNLOAD_PATH, file_name)
 
     try:
-        # 🔥 Show clean URL (without signature)
         log(f"[PRESIGNED URL] {url}")
 
         response = requests.get(url, timeout=30)
@@ -145,15 +133,22 @@ def safe_download(key):
 
 
 # ==============================
-# MAIN BATCH PROCESS
+# MAIN BATCH PROCESS (THREADING)
 # ==============================
 def run_batch():
     BATCH_SIZE = 100
+    batch_start = time.time()
 
     log("========== STARTING NEW BATCH ==========")
 
+    # 🔥 Step 1: Fetch S3 files
     all_keys = list_pdfs_from_s3()
-    to_process = [k for k in all_keys if report_should_be_processed(k)]
+
+    # 🔥 Step 2: Get processed files (ONLY 1 DB CALL)
+    processed_set = get_processed_files()
+
+    # 🔥 Step 3: Filter in memory
+    to_process = [k for k in all_keys if k not in processed_set]
 
     log(f"[BATCH] Total: {len(all_keys)} | To Process: {len(to_process)}")
 
@@ -161,44 +156,21 @@ def run_batch():
         log("[BATCH] No files to process")
         return
 
+    # Step 4: Take batch
     batch = to_process[:BATCH_SIZE]
 
-    for key in batch:
-        try:
-            start_time = time.time()   # 🔥 START TIMER
+    from extractor.thread_manager import run_threaded_batch
 
-            log(f"\nProcessing: {key}")
+    # Step 5: Run threading
+    run_threaded_batch(
+        batch_keys=batch,
+        safe_download=safe_download,
+        log=log,
+        max_workers=10
+    )
+    batch_end = time.time()   # 🔥 END
 
-            # Download
-            local_pdf = safe_download(key)
-            if not local_pdf:
-                continue
-
-            # Extract
-            header_data, df = extract_lab_data(local_pdf)
-
-            if header_data:
-                preview = dict(list(header_data.items())[:5])
-                log(f"[EXTRACTED] {preview}")
-            else:
-                log("[EXTRACTED] No header data")
-
-            # Insert
-            report_id = insert_lab_data(header_data, df, key)
-
-            if report_id:
-                log("[DB INSERT] SUCCESS")
-            else:
-                log("[DB INSERT] FAILED")
-
-            # 🔥 PROCESSING TIME
-            end_time = time.time()
-            log(f"[TIME] {round(end_time - start_time, 2)} sec")
-
-        except Exception as e:
-            log(f"[ERROR] {key}: {e}")
-            continue
-
+    log(f"[TOTAL BATCH TIME] {round(batch_end - batch_start, 2)} sec")
     log("========== BATCH COMPLETED ==========")
 
 
